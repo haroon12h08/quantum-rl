@@ -1,2 +1,2 @@
 # quantum-rl
-planksd2025(QML)
+planckd2025(QML)
