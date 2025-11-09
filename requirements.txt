@@ -1,0 +1,6 @@
+pennylane
+pennylane-qiskit
+numpy
+matplotlib
+gymnasium[box2d]
+# swig -- system level dependency, install manually if needed
