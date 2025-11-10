@@ -1,0 +1,9 @@
+Model,Environment,MeanReward
+DQN,CartPole-v1,10.4
+PPO,CartPole-v1,500.0
+DQN,LunarLander-v2,-506.8220838607949
+PPO,LunarLander-v2,-348.0804918075331
+DDPG,Pendulum-v1,-157.80392384086537
+TD3,Pendulum-v1,-100.37310341967125
+DDPG,BipedalWalker-v3,-137.82491482906093
+TD3,BipedalWalker-v3,-110.6170081270208
