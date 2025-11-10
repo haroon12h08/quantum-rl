@@ -1,12 +1,13 @@
 """
 Optimized Quantum DDPG for Fast Training (~7 minutes)
-Includes: CSV logging, plotting, and model checkpointing
+Includes: CSV logging, plotting, and model checkpointing (PICKLE-FRIENDLY)
 
 Key optimizations:
 - Reduced epochs: 25 instead of 300
 - Fewer episodes per epoch: 3 instead of 5
 - Fewer training steps: 20 instead of 50
 - Maintains architecture quality from original
+- Fixed pickle serialization issue
 """
 
 import gymnasium as gym
@@ -23,7 +24,7 @@ import os
 
 
 class QuantumActor:
-    """Improved quantum actor with deeper circuit"""
+    """Improved quantum actor with deeper circuit (PICKLE-FRIENDLY)"""
     def __init__(self, state_dim=24, n_qubits=4, n_actions=4, n_layers=2):
         self.state_dim = state_dim
         self.n_qubits = n_qubits
@@ -45,29 +46,8 @@ class QuantumActor:
         
         # Quantum circuit
         self.dev = qml.device('default.qubit', wires=n_qubits)
+        self.circuit = self._create_circuit()
         
-        @qml.qnode(self.dev, interface='autograd')
-        def q_circuit(inputs, weights):
-            # State encoding
-            for i in range(n_qubits):
-                qml.RY(inputs[i], wires=i)
-            
-            # Multiple variational layers
-            for layer in range(n_layers):
-                # Rotation layer
-                for i in range(n_qubits):
-                    qml.RY(weights[layer, i, 0], wires=i)
-                    qml.RZ(weights[layer, i, 1], wires=i)
-                
-                # Entanglement layer
-                for i in range(n_qubits - 1):
-                    qml.CNOT(wires=[i, i + 1])
-                # Circular entanglement
-                qml.CNOT(wires=[n_qubits - 1, 0])
-            
-            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
-        
-        self.circuit = q_circuit
         # Better initialization for quantum weights
         self.q_weights = pnp.random.uniform(0, np.pi/2, size=(n_layers, n_qubits, 2), requires_grad=True)
         
@@ -78,6 +58,31 @@ class QuantumActor:
         
         for p in [self.w_out, self.b_out]:
             p.requires_grad = True
+    
+    def _create_circuit(self):
+        """Create quantum circuit as a class method (pickle-friendly)"""
+        @qml.qnode(self.dev, interface='autograd')
+        def q_circuit(inputs, weights):
+            # State encoding
+            for i in range(self.n_qubits):
+                qml.RY(inputs[i], wires=i)
+            
+            # Multiple variational layers
+            for layer in range(self.n_layers):
+                # Rotation layer
+                for i in range(self.n_qubits):
+                    qml.RY(weights[layer, i, 0], wires=i)
+                    qml.RZ(weights[layer, i, 1], wires=i)
+                
+                # Entanglement layer
+                for i in range(self.n_qubits - 1):
+                    qml.CNOT(wires=[i, i + 1])
+                # Circular entanglement
+                qml.CNOT(wires=[self.n_qubits - 1, 0])
+            
+            return [qml.expval(qml.PauliZ(i)) for i in range(self.n_qubits)]
+        
+        return q_circuit
     
     def forward(self, state):
         """Forward pass with gradient clipping"""
@@ -431,13 +436,8 @@ def main():
     test_results = {'rewards': test_rewards}
     logger.plot_results(test_results)
     
-    # Save model
+    # Save model (PICKLE-FRIENDLY: save only parameters, not circuits)
     model_data = {
-        'actor': actor,
-        'critic': critic,
-        'target_actor': target_actor,
-        'target_critic': target_critic,
-        'replay_buffer': replay_buffer,
         'config': {
             'state_dim': 24,
             'n_qubits': 4,
@@ -450,6 +450,40 @@ def main():
             'batch_size': batch_size,
             'epochs': epochs,
             'episodes_per_epoch': episodes_per_epoch
+        },
+        'actor_parameters': {
+            'w_enc1': actor.w_enc1,
+            'b_enc1': actor.b_enc1,
+            'w_enc2': actor.w_enc2,
+            'b_enc2': actor.b_enc2,
+            'q_weights': actor.q_weights,
+            'w_out': actor.w_out,
+            'b_out': actor.b_out
+        },
+        'critic_parameters': {
+            'w1': critic.w1,
+            'b1': critic.b1,
+            'w2': critic.w2,
+            'b2': critic.b2,
+            'w3': critic.w3,
+            'b3': critic.b3
+        },
+        'target_actor_parameters': {
+            'w_enc1': target_actor.w_enc1,
+            'b_enc1': target_actor.b_enc1,
+            'w_enc2': target_actor.w_enc2,
+            'b_enc2': target_actor.b_enc2,
+            'q_weights': target_actor.q_weights,
+            'w_out': target_actor.w_out,
+            'b_out': target_actor.b_out
+        },
+        'target_critic_parameters': {
+            'w1': target_critic.w1,
+            'b1': target_critic.b1,
+            'w2': target_critic.w2,
+            'b2': target_critic.b2,
+            'w3': target_critic.w3,
+            'b3': target_critic.b3
         },
         'test_results': {
             'avg': test_avg,
@@ -472,5 +506,51 @@ def main():
     print("="*70)
 
 
+def load_trained_model(filename):
+    """Load a trained DDPG model from pickle file"""
+    with open(filename, 'rb') as f:
+        model_data = pickle.load(f)
+    
+    # Recreate networks
+    config = model_data['config']
+    actor = QuantumActor(
+        state_dim=config['state_dim'],
+        n_qubits=config['n_qubits'],
+        n_actions=config['n_actions'],
+        n_layers=config['n_layers']
+    )
+    critic = ClassicalCritic(
+        state_dim=config['state_dim'],
+        action_dim=config['n_actions']
+    )
+    
+    # Load parameters
+    actor_params = model_data['actor_parameters']
+    actor.w_enc1 = pnp.array(actor_params['w_enc1'], requires_grad=True)
+    actor.b_enc1 = pnp.array(actor_params['b_enc1'], requires_grad=True)
+    actor.w_enc2 = pnp.array(actor_params['w_enc2'], requires_grad=True)
+    actor.b_enc2 = pnp.array(actor_params['b_enc2'], requires_grad=True)
+    actor.q_weights = pnp.array(actor_params['q_weights'], requires_grad=True)
+    actor.w_out = pnp.array(actor_params['w_out'], requires_grad=True)
+    actor.b_out = pnp.array(actor_params['b_out'], requires_grad=True)
+    
+    critic_params = model_data['critic_parameters']
+    critic.w1 = pnp.array(critic_params['w1'], requires_grad=True)
+    critic.b1 = pnp.array(critic_params['b1'], requires_grad=True)
+    critic.w2 = pnp.array(critic_params['w2'], requires_grad=True)
+    critic.b2 = pnp.array(critic_params['b2'], requires_grad=True)
+    critic.w3 = pnp.array(critic_params['w3'], requires_grad=True)
+    critic.b3 = pnp.array(critic_params['b3'], requires_grad=True)
+    
+    print(f"✓ Model loaded from: {filename}")
+    print(f"  Test avg: {model_data['test_results']['avg']:.2f}")
+    
+    return actor, critic
+
+
 if __name__ == '__main__':
     main()
+    
+    # Example of loading and using the model:
+    # actor, critic = load_trained_model('ImprovedQuantumDDPG_model_TIMESTAMP.pkl')
+    # # Then use actor.forward(state) for inference
