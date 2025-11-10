@@ -1,115 +1,71 @@
+"""
+Optimized Quantum Policy Gradient for LunarLander-v3
+Uses data re-uploading and trainable input scaling
+"""
+
 import gymnasium as gym
 import numpy as np
 import pennylane as qml
 from pennylane import numpy as pnp
+import csv
+from datetime import datetime
 
 
-class ImprovedQuantumPolicyGradient:
+class QuantumPolicyGradient:
+    """Quantum policy with data re-uploading"""
     def __init__(self, n_qubits=4, n_actions=4, n_layers=3):
-        """
-        Improved quantum circuit with data re-uploading and input scaling.
-        
-        Based on recent research:
-        - Data re-uploading for expressiveness
-        - Input scaling parameters for better training
-        - Multiple observables for action selection
-        """
         self.n_qubits = n_qubits
         self.n_actions = n_actions
         self.n_layers = n_layers
-        self.dev = qml.device('default.qubit', wires=self.n_qubits)
+        self.dev = qml.device('default.qubit', wires=n_qubits)
         
         @qml.qnode(self.dev, interface='autograd')
         def circuit(inputs, weights, scaling):
-            """
-            Data re-uploading circuit with input scaling.
-            
-            Structure per layer:
-            1. Scaled state encoding (RY gates)
-            2. Variational rotations (RY, RZ)
-            3. Entangling gates (CNOT ring)
-            """
-            for layer in range(self.n_layers):
-                # Data re-uploading: encode state in each layer
-                for i in range(self.n_qubits):
-                    # Apply scaled input
-                    scaled_input = scaling[layer, i] * inputs[i]
-                    qml.RY(scaled_input, wires=i)
+            """Data re-uploading circuit with trainable input scaling"""
+            for layer in range(n_layers):
+                # Re-upload scaled data at each layer
+                for i in range(n_qubits):
+                    qml.RY(scaling[layer, i] * inputs[i], wires=i)
                 
                 # Variational layer
-                for i in range(self.n_qubits):
+                for i in range(n_qubits):
                     qml.RY(weights[layer, i, 0], wires=i)
                     qml.RZ(weights[layer, i, 1], wires=i)
                 
-                # Entangling layer (ring topology)
-                for i in range(self.n_qubits):
-                    qml.CNOT(wires=[i, (i + 1) % self.n_qubits])
+                # Entanglement
+                for i in range(n_qubits):
+                    qml.CNOT(wires=[i, (i + 1) % n_qubits])
             
-            # Return measurements for all qubits (used for different actions)
-            return [qml.expval(qml.PauliZ(i)) for i in range(self.n_qubits)]
+            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
         
         self.circuit = circuit
         
-        # Initialize trainable parameters
-        self.weights = pnp.random.uniform(
-            -np.pi, np.pi, 
-            size=(n_layers, n_qubits, 2), 
-            requires_grad=True
-        )
-        
-        # Input scaling parameters (crucial for training)
-        self.scaling = pnp.ones(
-            (n_layers, n_qubits), 
-            requires_grad=True
-        )
-        
-        # Output weights for each action
-        self.output_weights = pnp.random.uniform(
-            -1, 1,
-            size=(n_actions, n_qubits),
-            requires_grad=True
-        )
-    
-    def get_action_logits(self, state):
-        """Get raw logits for all actions using output weights"""
-        # Get expectation values for all qubits
-        expectations = pnp.array(self.circuit(state, self.weights, self.scaling))
-        
-        # Combine expectations using learned output weights for each action
-        logits = pnp.array([
-            pnp.sum(self.output_weights[action] * expectations)
-            for action in range(self.n_actions)
-        ])
-        
-        return logits
+        # Initialize parameters
+        self.weights = pnp.random.uniform(-np.pi, np.pi, size=(n_layers, n_qubits, 2), requires_grad=True)
+        self.scaling = pnp.ones((n_layers, n_qubits), requires_grad=True)
+        self.output_weights = pnp.random.randn(n_actions, n_qubits) * 0.1
+        self.output_weights.requires_grad = True
     
     def get_action_probs(self, state):
-        """Get probability distribution over all actions"""
-        logits = self.get_action_logits(state)
-        
-        # Softmax with temperature scaling
+        """Get action probabilities"""
+        expectations = pnp.array(self.circuit(state, self.weights, self.scaling))
+        logits = pnp.array([pnp.sum(self.output_weights[a] * expectations) for a in range(self.n_actions)])
         exp_logits = pnp.exp(logits - pnp.max(logits))
-        probs = exp_logits / pnp.sum(exp_logits)
-        return probs
+        return exp_logits / pnp.sum(exp_logits)
     
     def select_action(self, state):
         """Sample action from policy"""
         probs = self.get_action_probs(state)
-        probs_np = np.array(probs)
-        action = np.random.choice(self.n_actions, p=probs_np)
-        return action, probs
+        return int(np.random.choice(self.n_actions, p=np.array(probs)))
     
-    def get_trainable_params(self):
-        """Return all trainable parameters"""
+    def parameters(self):
         return [self.weights, self.scaling, self.output_weights]
 
 
 def normalize_state(state):
-    """Normalize state to appropriate range for quantum encoding"""
-    # LunarLander state space ranges
-    state_bounds = np.array([1.5, 1.5, 5.0, 5.0, 3.14, 5.0, 1.0, 1.0])
-    normalized = np.clip(state / state_bounds, -1, 1) * np.pi
-    return normalized
+    """Normalize LunarLander state to quantum range"""
+    bounds = np.array([1.5, 1.5, 5.0, 5.0, 3.14, 5.0, 1.0, 1.0])
+    return np.clip(state / bounds, -1, 1) * np.pi
 
 
 def discount_rewards(rewards, gamma=0.99):
@@ -125,43 +81,34 @@ def discount_rewards(rewards, gamma=0.99):
 def main():
     env = gym.make('LunarLander-v3')
     
-    # Improved agent with data re-uploading
-    agent = ImprovedQuantumPolicyGradient(
-        n_qubits=4, 
-        n_actions=4,
-        n_layers=3  # More layers for better expressiveness
-    )
+    agent = QuantumPolicyGradient(n_qubits=4, n_actions=4, n_layers=3)
     
-    # Separate optimizers with different learning rates (proven technique)
-    opt_weights = qml.AdamOptimizer(stepsize=0.01)
-    opt_scaling = qml.AdamOptimizer(stepsize=0.005)
-    opt_output = qml.AdamOptimizer(stepsize=0.01)
+    # Single optimizer for all parameters
+    optimizer = qml.AdamOptimizer(stepsize=0.01)
     
-    epochs = 30  # Reduced for faster training
-    episodes_per_epoch = 5
+    epochs = 10
+    episodes_per_epoch = 10
+    gamma = 0.99
     
+    results = []
     best_reward = -float('inf')
     
+    print("Training Quantum Policy Gradient on LunarLander-v3")
+    print("=" * 60)
+    
     for epoch in range(epochs):
-        epoch_rewards = []
         epoch_trajectories = []
+        epoch_rewards = []
         
         for ep in range(episodes_per_epoch):
             state, _ = env.reset()
+            trajectory = {'states': [], 'actions': [], 'rewards': []}
             done = False
+            steps = 0
             
-            trajectory = {
-                'states': [],
-                'actions': [],
-                'rewards': []
-            }
-            
-            step_count = 0
-            max_steps = 500
-            
-            while not done and step_count < max_steps:
+            while not done and steps < 500:
                 norm_state = normalize_state(state)
-                action, probs = agent.select_action(norm_state)
+                action = agent.select_action(norm_state)
                 
                 next_state, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
@@ -171,12 +118,12 @@ def main():
                 trajectory['rewards'].append(reward)
                 
                 state = next_state
-                step_count += 1
+                steps += 1
             
-            # Calculate returns with baseline subtraction
-            returns = discount_rewards(trajectory['rewards'])
+            # Calculate returns
+            returns = discount_rewards(trajectory['rewards'], gamma)
             
-            # Normalize returns (reduces variance)
+            # Normalize returns
             if len(returns) > 1:
                 returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-8)
             
@@ -185,100 +132,82 @@ def main():
             epoch_rewards.append(sum(trajectory['rewards']))
         
         # Policy gradient update
-        def cost_fn(params):
-            weights, scaling, output_weights = params
+        def loss_fn(weights, scaling, output_weights):
             total_loss = 0
             n_steps = 0
             
             for traj in epoch_trajectories:
-                for state, action, ret in zip(
-                    traj['states'], 
-                    traj['actions'], 
-                    traj['returns']
-                ):
-                    # Get expectations
+                for state, action, ret in zip(traj['states'], traj['actions'], traj['returns']):
                     expectations = pnp.array(agent.circuit(state, weights, scaling))
-                    
-                    # Calculate logits for all actions
-                    logits = pnp.array([
-                        pnp.sum(output_weights[a] * expectations)
-                        for a in range(agent.n_actions)
-                    ])
-                    
-                    # Softmax
+                    logits = pnp.array([pnp.sum(output_weights[a] * expectations) for a in range(agent.n_actions)])
                     exp_logits = pnp.exp(logits - pnp.max(logits))
-                    action_probs = exp_logits / pnp.sum(exp_logits)
-                    
-                    # Log probability of taken action
-                    log_prob = pnp.log(action_probs[action] + 1e-8)
-                    
-                    # Policy gradient loss
+                    probs = exp_logits / pnp.sum(exp_logits)
+                    log_prob = pnp.log(probs[action] + 1e-8)
                     total_loss -= log_prob * ret
                     n_steps += 1
             
             return total_loss / n_steps if n_steps > 0 else 0
         
-        # Update weights
-        def cost_weights(w):
-            return cost_fn([w, agent.scaling, agent.output_weights])
-        agent.weights = opt_weights.step(cost_weights, agent.weights)
-        
-        # Update scaling
-        def cost_scaling(s):
-            return cost_fn([agent.weights, s, agent.output_weights])
-        agent.scaling = opt_scaling.step(cost_scaling, agent.scaling)
-        
-        # Update output weights
-        def cost_output(o):
-            return cost_fn([agent.weights, agent.scaling, o])
-        agent.output_weights = opt_output.step(cost_output, agent.output_weights)
+        params = agent.parameters()
+        params = optimizer.step(loss_fn, *params)
+        agent.weights, agent.scaling, agent.output_weights = params
         
         # Logging
         avg_reward = np.mean(epoch_rewards)
         max_reward = np.max(epoch_rewards)
         min_reward = np.min(epoch_rewards)
-        
         if avg_reward > best_reward:
             best_reward = avg_reward
         
-        print(f"Epoch {epoch + 1:2d} | "
-              f"Avg: {avg_reward:7.2f} | "
-              f"Max: {max_reward:7.2f} | "
-              f"Min: {min_reward:7.2f} | "
-              f"Best: {best_reward:7.2f}")
+        results.append({
+            'epoch': epoch + 1,
+            'avg_reward': avg_reward,
+            'max_reward': max_reward,
+            'min_reward': min_reward,
+            'best_reward': best_reward
+        })
         
-        # Early stopping
+        print(f"Epoch {epoch + 1:2d} | Avg: {avg_reward:7.2f} | Max: {max_reward:7.2f} | "
+              f"Min: {min_reward:7.2f} | Best: {best_reward:7.2f}")
+        
         if avg_reward > 200:
-            print(f"\nEnvironment solved in {epoch + 1} epochs!")
+            print(f"\nEnvironment solved at epoch {epoch + 1}!")
             break
     
     env.close()
     
-    # Test the trained agent
-    print("\n--- Testing trained agent ---")
-    test_env = gym.make('LunarLander-v3', render_mode='rgb_array')
-    test_rewards = []
+    # Save results to CSV
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = f'results_lunarlander_{timestamp}.csv'
     
-    for test_ep in range(10):
-        state, _ = test_env.reset()
-        total_reward = 0
-        done = False
-        steps = 0
-        
-        while not done and steps < 500:
-            norm_state = normalize_state(state)
-            probs = agent.get_action_probs(norm_state)
-            action = np.argmax(np.array(probs))  # Greedy
-            state, reward, terminated, truncated, _ = test_env.step(action)
-            total_reward += reward
-            done = terminated or truncated
-            steps += 1
-        
-        test_rewards.append(total_reward)
-        print(f"Test episode {test_ep + 1}: {total_reward:.2f}")
+    with open(csv_filename, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['epoch', 'avg_reward', 'max_reward', 'min_reward', 'best_reward'])
+        writer.writeheader()
+        writer.writerows(results)
     
-    print(f"\nTest average: {np.mean(test_rewards):.2f} ± {np.std(test_rewards):.2f}")
-    test_env.close()
+    print(f"\n✓ Results saved to: {csv_filename}")
+    
+    # Save model
+    model_data = {
+        'weights': np.array(agent.weights),
+        'scaling': np.array(agent.scaling),
+        'output_weights': np.array(agent.output_weights),
+        'architecture': {
+            'n_qubits': agent.n_qubits,
+            'n_actions': agent.n_actions,
+            'n_layers': agent.n_layers
+        },
+        'final_performance': {
+            'best_reward': float(best_reward),
+            'total_epochs': epochs
+        }
+    }
+    
+    model_filename = f'model_lunarlander_{timestamp}.npy'
+    np.save(model_filename, model_data)
+    print(f"✓ Model saved to: {model_filename}")
+    
+    return results
 
 
 if __name__ == '__main__':

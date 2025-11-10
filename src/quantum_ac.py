@@ -1,399 +1,269 @@
+"""
+Optimized Quantum Actor-Critic for BipedalWalker-v3
+Simplified from complex version while keeping key improvements
+"""
+
 import gymnasium as gym
 import numpy as np
 import pennylane as qml
 from pennylane import numpy as pnp
+import csv
+from datetime import datetime
 
 
 class QuantumActorCritic:
-    """
-    Improved Quantum Actor-Critic with:
-    - More state dimensions
-    - Better action space
-    - Entropy bonus for exploration
-    """
-    def __init__(self, n_qubits=8, n_actions=9, n_layers=2):
+    """Quantum Actor-Critic with data re-uploading inspiration"""
+    def __init__(self, n_qubits=4, n_actions=4, n_layers=2):
         self.n_qubits = n_qubits
         self.n_actions = n_actions
         self.n_layers = n_layers
         
-        # Separate devices for actor and critic
-        self.actor_dev = qml.device('default.qubit', wires=n_qubits)
-        self.critic_dev = qml.device('default.qubit', wires=n_qubits)
+        self.dev = qml.device('default.qubit', wires=n_qubits)
         
-        # Actor circuit (policy)
-        @qml.qnode(self.actor_dev, interface='autograd')
-        def actor_circuit(inputs, weights, scaling):
-            for layer in range(self.n_layers):
-                # State encoding with scaling
-                for i in range(self.n_qubits):
-                    qml.RY(scaling[layer, i] * inputs[i], wires=i)
+        # Actor circuit with data re-uploading
+        @qml.qnode(self.dev, interface='autograd')
+        def actor_circuit(inputs, weights):
+            for layer in range(n_layers):
+                # Re-upload data at each layer
+                for i in range(n_qubits):
+                    qml.RY(inputs[i], wires=i)
                 
                 # Variational layer
-                for i in range(self.n_qubits):
+                for i in range(n_qubits):
                     qml.RY(weights[layer, i, 0], wires=i)
                     qml.RZ(weights[layer, i, 1], wires=i)
-                    qml.RX(weights[layer, i, 2], wires=i)
-                
-                # Stronger entanglement
-                for i in range(self.n_qubits):
-                    qml.CNOT(wires=[i, (i + 1) % self.n_qubits])
-                if layer < self.n_layers - 1:  # Extra entanglement except last layer
-                    for i in range(0, self.n_qubits - 1, 2):
-                        qml.CNOT(wires=[i, i + 1])
-            
-            return [qml.expval(qml.PauliZ(i)) for i in range(self.n_qubits)]
-        
-        # Critic circuit (value function)
-        @qml.qnode(self.critic_dev, interface='autograd')
-        def critic_circuit(inputs, weights, scaling):
-            for layer in range(self.n_layers):
-                # State encoding
-                for i in range(self.n_qubits):
-                    qml.RY(scaling[layer, i] * inputs[i], wires=i)
-                
-                # Variational layer
-                for i in range(self.n_qubits):
-                    qml.RY(weights[layer, i, 0], wires=i)
-                    qml.RZ(weights[layer, i, 1], wires=i)
-                    qml.RX(weights[layer, i, 2], wires=i)
                 
                 # Entanglement
-                for i in range(self.n_qubits):
-                    qml.CNOT(wires=[i, (i + 1) % self.n_qubits])
+                for i in range(n_qubits - 1):
+                    qml.CNOT(wires=[i, i + 1])
             
-            # Average of multiple qubits for more stable value
-            return [qml.expval(qml.PauliZ(i)) for i in range(min(3, self.n_qubits))]
+            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+        
+        # Critic circuit
+        @qml.qnode(self.dev, interface='autograd')
+        def critic_circuit(inputs, weights):
+            for layer in range(n_layers):
+                for i in range(n_qubits):
+                    qml.RY(inputs[i], wires=i)
+                
+                for i in range(n_qubits):
+                    qml.RY(weights[layer, i, 0], wires=i)
+                    qml.RZ(weights[layer, i, 1], wires=i)
+                
+                for i in range(n_qubits - 1):
+                    qml.CNOT(wires=[i, i + 1])
+            
+            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
         
         self.actor_circuit = actor_circuit
         self.critic_circuit = critic_circuit
         
-        # Actor parameters (more gates = more parameters)
-        self.actor_weights = pnp.random.uniform(
-            -np.pi, np.pi, 
-            size=(n_layers, n_qubits, 3),  # Added RX gate
-            requires_grad=True
-        )
-        self.actor_scaling = pnp.ones(
-            (n_layers, n_qubits), 
-            requires_grad=True
-        )
-        self.actor_output_weights = pnp.random.uniform(
-            -1, 1,
-            size=(n_actions, n_qubits),
-            requires_grad=True
-        )
+        # Trainable input scaling (key from data re-uploading)
+        self.actor_input_scale = pnp.ones(n_qubits, requires_grad=True)
+        self.critic_input_scale = pnp.ones(n_qubits, requires_grad=True)
         
-        # Critic parameters
-        self.critic_weights = pnp.random.uniform(
-            -np.pi, np.pi, 
-            size=(n_layers, n_qubits, 3),
-            requires_grad=True
-        )
-        self.critic_scaling = pnp.ones(
-            (n_layers, n_qubits), 
-            requires_grad=True
-        )
-        self.critic_output_weights = pnp.ones(3, requires_grad=True)
+        # Quantum weights
+        self.actor_weights = pnp.random.uniform(0, 2*np.pi, size=(n_layers, n_qubits, 2), requires_grad=True)
+        self.critic_weights = pnp.random.uniform(0, 2*np.pi, size=(n_layers, n_qubits, 2), requires_grad=True)
+        
+        # Output layers
+        self.actor_output = pnp.random.randn(n_actions, n_qubits) * 0.1
+        self.actor_output.requires_grad = True
+        self.critic_output = pnp.random.randn(n_qubits) * 0.1
+        self.critic_output.requires_grad = True
     
     def get_action_probs(self, state):
-        """Get action probabilities from actor"""
-        expectations = pnp.array(
-            self.actor_circuit(state, self.actor_weights, self.actor_scaling)
-        )
-        
-        logits = pnp.array([
-            pnp.sum(self.actor_output_weights[action] * expectations)
-            for action in range(self.n_actions)
-        ])
-        
-        # Temperature scaling for exploration
-        temperature = 1.5
-        logits = logits / temperature
-        
+        scaled_state = state * self.actor_input_scale
+        q_out = pnp.array(self.actor_circuit(scaled_state, self.actor_weights))
+        logits = pnp.dot(self.actor_output, q_out)
         exp_logits = pnp.exp(logits - pnp.max(logits))
-        probs = exp_logits / pnp.sum(exp_logits)
-        return probs
+        return exp_logits / pnp.sum(exp_logits)
     
     def get_value(self, state):
-        """Get state value from critic"""
-        expectations = pnp.array(
-            self.critic_circuit(state, self.critic_weights, self.critic_scaling)
-        )
-        # Average multiple measurements
-        value = pnp.sum(self.critic_output_weights * expectations) * 20
-        return value
+        scaled_state = state * self.critic_input_scale
+        q_out = pnp.array(self.critic_circuit(scaled_state, self.critic_weights))
+        return pnp.dot(self.critic_output, q_out)
     
-    def select_action(self, state):
-        """Sample action from policy"""
-        probs = self.get_action_probs(state)
-        probs_np = np.array(probs)
-        action = np.random.choice(self.n_actions, p=probs_np)
-        return action
+    def actor_parameters(self):
+        return [self.actor_input_scale, self.actor_weights, self.actor_output]
+    
+    def critic_parameters(self):
+        return [self.critic_input_scale, self.critic_weights, self.critic_output]
 
 
 def normalize_state(state):
-    """
-    BipedalWalker: Use 8 most important dimensions instead of 6
-    Includes: hull angle, velocities, hip/knee angles for both legs
-    """
-    # Select critical features
-    important_indices = [0, 1, 2, 3, 4, 5, 8, 9]  # Hull + leg hip joints
-    reduced_state = state[important_indices]
-    
-    # Normalize to [-pi, pi] range
-    state_bounds = np.array([3.14, 5.0, 3.14, 5.0, 3.14, 5.0, 3.14, 5.0])
-    normalized = np.clip(reduced_state / state_bounds, -1, 1) * np.pi
-    return normalized
-
-
-def discount_rewards(rewards, gamma=0.99):
-    """Calculate discounted returns"""
-    discounted = np.zeros_like(rewards, dtype=np.float64)
-    cumulative = 0
-    for i in reversed(range(len(rewards))):
-        cumulative = rewards[i] + gamma * cumulative
-        discounted[i] = cumulative
-    return discounted
+    """Reduce 24D to 4D using most critical features"""
+    # Hull angle, angular velocity, and first leg's joint angles
+    indices = [0, 2, 4, 6]
+    reduced = state[indices]
+    # Normalize
+    bounds = np.array([3.14, 5.0, 3.14, 3.14])
+    return np.clip(reduced / bounds, -1, 1) * np.pi
 
 
 def main():
     env = gym.make('BipedalWalker-v3')
     
-    # Improved agent with more capacity
-    agent = QuantumActorCritic(
-        n_qubits=8,  # More state info
-        n_actions=9,  # More granular control
-        n_layers=2
-    )
+    agent = QuantumActorCritic(n_qubits=4, n_actions=4, n_layers=2)
     
-    # Separate optimizers for each parameter
-    actor_weights_opt = qml.AdamOptimizer(stepsize=0.005)  # Slower learning
-    actor_scaling_opt = qml.AdamOptimizer(stepsize=0.003)
-    actor_output_opt = qml.AdamOptimizer(stepsize=0.005)
+    actor_opt = qml.AdamOptimizer(stepsize=0.003)
+    critic_opt = qml.AdamOptimizer(stepsize=0.01)
     
-    critic_weights_opt = qml.AdamOptimizer(stepsize=0.01)
-    critic_scaling_opt = qml.AdamOptimizer(stepsize=0.007)
-    critic_output_opt = qml.AdamOptimizer(stepsize=0.01)
+    epochs = 10
+    episodes_per_epoch = 5
+    gamma = 0.99
     
-    epochs = 40
-    episodes_per_epoch = 3
-    
-    best_reward = -float('inf')
-    
-    # Improved action mapping with more granular control
+    # Action mapping
     action_map = {
-        0: np.array([0.0, 0.0, 0.0, 0.0]),       # No action
-        1: np.array([1.0, 0.0, 1.0, 0.0]),       # Forward strong
-        2: np.array([0.5, 0.0, 0.5, 0.0]),       # Forward weak
-        3: np.array([-1.0, 0.0, -1.0, 0.0]),     # Backward strong
-        4: np.array([-0.5, 0.0, -0.5, 0.0]),     # Backward weak
-        5: np.array([0.0, 1.0, 0.0, 1.0]),       # Jump
-        6: np.array([0.0, 0.5, 0.0, 0.5]),       # Small jump
-        7: np.array([1.0, 0.5, 1.0, 0.5]),       # Forward jump
-        8: np.array([-1.0, 0.5, -1.0, 0.5])      # Backward jump
+        0: np.array([0.0, 0.0, 0.0, 0.0]),
+        1: np.array([1.0, 0.0, 1.0, 0.0]),
+        2: np.array([-1.0, 0.0, -1.0, 0.0]),
+        3: np.array([0.5, 1.0, 0.5, 1.0])
     }
     
-    # Entropy coefficient for exploration
-    entropy_coef = 0.01
+    # Track results for CSV
+    results = []
+    best_reward = -float('inf')
+    
+    print("Training Quantum Actor-Critic on BipedalWalker-v3")
+    print("=" * 60)
     
     for epoch in range(epochs):
-        epoch_rewards = []
         epoch_trajectories = []
+        epoch_rewards = []
         
         for ep in range(episodes_per_epoch):
             state, _ = env.reset()
+            trajectory = {'states': [], 'actions': [], 'rewards': [], 'values': []}
             done = False
+            steps = 0
             
-            trajectory = {
-                'states': [],
-                'actions': [],
-                'rewards': [],
-                'values': [],
-                'log_probs': []
-            }
-            
-            step_count = 0
-            max_steps = 1000  # Longer episodes
-            
-            while not done and step_count < max_steps:
+            while not done and steps < 1600:
                 norm_state = normalize_state(state)
-                
-                # Get action and value
                 probs = agent.get_action_probs(norm_state)
-                action = np.random.choice(agent.n_actions, p=np.array(probs))
+                action = int(np.random.choice(agent.n_actions, p=np.array(probs)))
                 value = agent.get_value(norm_state)
                 
-                # Calculate log probability for this action
-                log_prob = pnp.log(probs[action] + 1e-8)
-                
-                # Map discrete action to continuous
-                continuous_action = action_map[action]
-                
-                next_state, reward, terminated, truncated, _ = env.step(continuous_action)
+                next_state, reward, terminated, truncated, _ = env.step(action_map[action])
                 done = terminated or truncated
                 
                 trajectory['states'].append(norm_state)
                 trajectory['actions'].append(action)
                 trajectory['rewards'].append(reward)
-                trajectory['values'].append(value)
-                trajectory['log_probs'].append(log_prob)
+                trajectory['values'].append(float(value))
                 
                 state = next_state
-                step_count += 1
+                steps += 1
             
             # Calculate advantages
-            returns = discount_rewards(trajectory['rewards'])
-            values = np.array([float(v) for v in trajectory['values']])
+            returns = []
+            R = 0
+            for r in reversed(trajectory['rewards']):
+                R = r + gamma * R
+                returns.insert(0, R)
+            returns = np.array(returns)
+            values = np.array(trajectory['values'])
             advantages = returns - values
-            
-            # Normalize advantages
             if len(advantages) > 1:
                 advantages = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-8)
             
             trajectory['returns'] = returns
             trajectory['advantages'] = advantages
-            
             epoch_trajectories.append(trajectory)
             epoch_rewards.append(sum(trajectory['rewards']))
         
-        # Update Actor with entropy bonus
-        def actor_loss(actor_params):
-            actor_weights, actor_scaling, actor_output = actor_params
-            policy_loss = 0
-            entropy_loss = 0
-            n_steps = 0
-            
+        # Update actor
+        def actor_loss(input_scale, weights, output):
+            loss = 0
+            n = 0
             for traj in epoch_trajectories:
-                for state, action, advantage in zip(
-                    traj['states'], 
-                    traj['actions'], 
-                    traj['advantages']
-                ):
-                    expectations = pnp.array(
-                        agent.actor_circuit(state, actor_weights, actor_scaling)
-                    )
-                    logits = pnp.array([
-                        pnp.sum(actor_output[a] * expectations)
-                        for a in range(agent.n_actions)
-                    ])
-                    
-                    temperature = 1.5
-                    logits = logits / temperature
-                    
+                for state, action, adv in zip(traj['states'], traj['actions'], traj['advantages']):
+                    scaled = state * input_scale
+                    q_out = pnp.array(agent.actor_circuit(scaled, weights))
+                    logits = pnp.dot(output, q_out)
                     exp_logits = pnp.exp(logits - pnp.max(logits))
                     probs = exp_logits / pnp.sum(exp_logits)
-                    
                     log_prob = pnp.log(probs[action] + 1e-8)
-                    policy_loss -= log_prob * advantage
-                    
-                    # Entropy bonus for exploration
-                    entropy = -pnp.sum(probs * pnp.log(probs + 1e-8))
-                    entropy_loss -= entropy
-                    
-                    n_steps += 1
-            
-            total_loss = policy_loss + entropy_coef * entropy_loss
-            return total_loss / n_steps if n_steps > 0 else 0
+                    loss -= log_prob * adv
+                    n += 1
+            return loss / n if n > 0 else 0
         
-        # Update Critic
-        def critic_loss(critic_params):
-            critic_weights, critic_scaling, critic_output = critic_params
+        # Update critic
+        def critic_loss(input_scale, weights, output):
             loss = 0
-            n_steps = 0
-            
+            n = 0
             for traj in epoch_trajectories:
                 for state, ret in zip(traj['states'], traj['returns']):
-                    expectations = pnp.array(
-                        agent.critic_circuit(state, critic_weights, critic_scaling)
-                    )
-                    predicted_value = pnp.sum(critic_output * expectations) * 20
-                    
-                    # Huber loss (more robust than MSE)
-                    error = predicted_value - ret
-                    huber_delta = 10.0
-                    if pnp.abs(error) <= huber_delta:
-                        loss += 0.5 * error ** 2
-                    else:
-                        loss += huber_delta * (pnp.abs(error) - 0.5 * huber_delta)
-                    
-                    n_steps += 1
-            
-            return loss / n_steps if n_steps > 0 else 0
+                    scaled = state * input_scale
+                    q_out = pnp.array(agent.critic_circuit(scaled, weights))
+                    value = pnp.dot(output, q_out)
+                    loss += (value - ret) ** 2
+                    n += 1
+            return loss / n if n > 0 else 0
         
-        # Update actor parameters
-        def actor_weights_cost(w):
-            return actor_loss([w, agent.actor_scaling, agent.actor_output_weights])
-        agent.actor_weights = actor_weights_opt.step(actor_weights_cost, agent.actor_weights)
+        actor_params = agent.actor_parameters()
+        actor_params = actor_opt.step(actor_loss, *actor_params)
+        agent.actor_input_scale, agent.actor_weights, agent.actor_output = actor_params
         
-        def actor_scaling_cost(s):
-            return actor_loss([agent.actor_weights, s, agent.actor_output_weights])
-        agent.actor_scaling = actor_scaling_opt.step(actor_scaling_cost, agent.actor_scaling)
-        
-        def actor_output_cost(o):
-            return actor_loss([agent.actor_weights, agent.actor_scaling, o])
-        agent.actor_output_weights = actor_output_opt.step(actor_output_cost, agent.actor_output_weights)
-        
-        # Update critic parameters
-        def critic_weights_cost(w):
-            return critic_loss([w, agent.critic_scaling, agent.critic_output_weights])
-        agent.critic_weights = critic_weights_opt.step(critic_weights_cost, agent.critic_weights)
-        
-        def critic_scaling_cost(s):
-            return critic_loss([agent.critic_weights, s, agent.critic_output_weights])
-        agent.critic_scaling = critic_scaling_opt.step(critic_scaling_cost, agent.critic_scaling)
-        
-        def critic_output_cost(o):
-            return critic_loss([agent.critic_weights, agent.critic_scaling, o])
-        agent.critic_output_weights = critic_output_opt.step(critic_output_cost, agent.critic_output_weights)
+        critic_params = agent.critic_parameters()
+        critic_params = critic_opt.step(critic_loss, *critic_params)
+        agent.critic_input_scale, agent.critic_weights, agent.critic_output = critic_params
         
         # Logging
         avg_reward = np.mean(epoch_rewards)
         max_reward = np.max(epoch_rewards)
         min_reward = np.min(epoch_rewards)
-        
         if avg_reward > best_reward:
             best_reward = avg_reward
         
-        print(f"Epoch {epoch + 1:2d} | "
-              f"Avg: {avg_reward:7.2f} | "
-              f"Max: {max_reward:7.2f} | "
-              f"Min: {min_reward:7.2f} | "
-              f"Best: {best_reward:7.2f}")
+        results.append({
+            'epoch': epoch + 1,
+            'avg_reward': avg_reward,
+            'max_reward': max_reward,
+            'min_reward': min_reward,
+            'best_reward': best_reward
+        })
         
-        # Early stopping
-        if avg_reward > 250:
-            print(f"\nEnvironment performing well at epoch {epoch + 1}!")
-            break
+        print(f"Epoch {epoch + 1:2d} | Avg: {avg_reward:7.2f} | Max: {max_reward:7.2f} | "
+              f"Min: {min_reward:7.2f} | Best: {best_reward:7.2f}")
     
     env.close()
     
-    # Test the trained agent
-    print("\n--- Testing trained agent ---")
-    test_env = gym.make('BipedalWalker-v3', render_mode='rgb_array')
-    test_rewards = []
+    # Save results to CSV
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = f'results_bipedal_{timestamp}.csv'
     
-    for test_ep in range(5):
-        state, _ = test_env.reset()
-        total_reward = 0
-        done = False
-        steps = 0
-        
-        while not done and steps < 1000:
-            norm_state = normalize_state(state)
-            probs = agent.get_action_probs(norm_state)
-            action = np.random.choice(agent.n_actions, p=np.array(probs))
-            continuous_action = action_map[action]
-            
-            state, reward, terminated, truncated, _ = test_env.step(continuous_action)
-            total_reward += reward
-            done = terminated or truncated
-            steps += 1
-        
-        test_rewards.append(total_reward)
-        print(f"Test episode {test_ep + 1}: {total_reward:.2f}")
+    with open(csv_filename, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['epoch', 'avg_reward', 'max_reward', 'min_reward', 'best_reward'])
+        writer.writeheader()
+        writer.writerows(results)
     
-    print(f"\nTest average: {np.mean(test_rewards):.2f} ± {np.std(test_rewards):.2f}")
-    test_env.close()
+    print(f"\n✓ Results saved to: {csv_filename}")
+    
+    # Save model
+    model_data = {
+        'actor_input_scale': np.array(agent.actor_input_scale),
+        'actor_weights': np.array(agent.actor_weights),
+        'actor_output': np.array(agent.actor_output),
+        'critic_input_scale': np.array(agent.critic_input_scale),
+        'critic_weights': np.array(agent.critic_weights),
+        'critic_output': np.array(agent.critic_output),
+        'architecture': {
+            'n_qubits': agent.n_qubits,
+            'n_actions': agent.n_actions,
+            'n_layers': agent.n_layers
+        },
+        'final_performance': {
+            'best_reward': float(best_reward),
+            'total_epochs': epochs
+        }
+    }
+    
+    model_filename = f'model_bipedal_{timestamp}.npy'
+    np.save(model_filename, model_data)
+    print(f"✓ Model saved to: {model_filename}")
+    
+    return results
 
 
 if __name__ == '__main__':

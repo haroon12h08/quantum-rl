@@ -1,11 +1,12 @@
 """
-Improved Quantum DDPG for Continuous Action Spaces
-Key improvements:
-1. Deeper quantum circuit (2 layers)
-2. Better initialization
-3. Gradient clipping
-4. Warm-up period before training
-5. Better exploration strategy
+Optimized Quantum DDPG for Fast Training (~7 minutes)
+Includes: CSV logging, plotting, and model checkpointing
+
+Key optimizations:
+- Reduced epochs: 25 instead of 300
+- Fewer episodes per epoch: 3 instead of 5
+- Fewer training steps: 20 instead of 50
+- Maintains architecture quality from original
 """
 
 import gymnasium as gym
@@ -14,6 +15,11 @@ import pennylane as qml
 from pennylane import numpy as pnp
 from collections import deque
 import random
+import csv
+import pickle
+import matplotlib.pyplot as plt
+from datetime import datetime
+import os
 
 
 class QuantumActor:
@@ -139,24 +145,88 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-def clip_gradients(params, max_norm=1.0):
-    """Clip gradients by global norm"""
-    total_norm = 0
-    for p in params:
-        if hasattr(p, 'grad') and p.grad is not None:
-            total_norm += pnp.sum(p.grad ** 2)
-    total_norm = pnp.sqrt(total_norm)
+class TrainingLogger:
+    """Logs training metrics"""
+    def __init__(self, model_name):
+        self.model_name = model_name
+        self.timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.csv_filename = f'{model_name}_training_{self.timestamp}.csv'
+        self.data = []
+        
+    def log_epoch(self, epoch, avg_reward, max_reward, min_reward, std_reward, noise):
+        self.data.append({
+            'epoch': epoch,
+            'avg_reward': avg_reward,
+            'max_reward': max_reward,
+            'min_reward': min_reward,
+            'std_reward': std_reward,
+            'exploration_noise': noise
+        })
     
-    if total_norm > max_norm:
-        scale = max_norm / (total_norm + 1e-6)
-        for p in params:
-            if hasattr(p, 'grad') and p.grad is not None:
-                p.grad *= scale
+    def save_csv(self):
+        with open(self.csv_filename, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                'epoch', 'avg_reward', 'max_reward', 'min_reward', 'std_reward', 'exploration_noise'
+            ])
+            writer.writeheader()
+            writer.writerows(self.data)
+        print(f"\n✓ Training log saved: {self.csv_filename}")
+        return self.csv_filename
     
-    return params
+    def plot_results(self, test_results=None):
+        """Create training and test plots"""
+        epochs = [d['epoch'] for d in self.data]
+        avg_rewards = [d['avg_reward'] for d in self.data]
+        max_rewards = [d['max_reward'] for d in self.data]
+        min_rewards = [d['min_reward'] for d in self.data]
+        
+        fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+        fig.suptitle(f'{self.model_name} - Training Results', fontsize=16)
+        
+        # Training progress
+        ax1 = axes[0]
+        ax1.plot(epochs, avg_rewards, label='Average', linewidth=2, color='blue')
+        ax1.plot(epochs, max_rewards, label='Max', linewidth=1, alpha=0.7, color='green')
+        ax1.plot(epochs, min_rewards, label='Min', linewidth=1, alpha=0.7, color='red')
+        ax1.fill_between(epochs, min_rewards, max_rewards, alpha=0.2)
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Reward')
+        ax1.set_title('Training Progress')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Test results (if provided)
+        ax2 = axes[1]
+        if test_results:
+            test_rewards = test_results['rewards']
+            ax2.bar(range(len(test_rewards)), test_rewards, alpha=0.7, color='purple')
+            ax2.axhline(y=np.mean(test_rewards), color='red', linestyle='--', 
+                       label=f"Mean: {np.mean(test_rewards):.2f}")
+            ax2.set_xlabel('Test Episode')
+            ax2.set_ylabel('Reward')
+            ax2.set_title(f"Test Performance ({len(test_rewards)} episodes)")
+            ax2.legend()
+            ax2.grid(True, alpha=0.3, axis='y')
+        else:
+            ax2.text(0.5, 0.5, 'Test results not available', 
+                    ha='center', va='center', transform=ax2.transAxes)
+            ax2.axis('off')
+        
+        plt.tight_layout()
+        plot_filename = f'{self.model_name}_plots_{self.timestamp}.png'
+        plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
+        print(f"✓ Plots saved: {plot_filename}")
+        return plot_filename
 
 
 def main():
+    model_name = "ImprovedQuantumDDPG"
+    
+    print("="*70)
+    print(f"Training: {model_name}")
+    print("Optimized for ~7 minute runtime")
+    print("="*70)
+    
     env = gym.make('BipedalWalker-v3')
     
     # Improved architecture
@@ -172,24 +242,29 @@ def main():
         target_critic.parameters()[i] = pnp.copy(p)
     
     replay_buffer = ReplayBuffer(capacity=50000)
+    logger = TrainingLogger(model_name)
     
-    # Adjusted hyperparameters
-    actor_optimizer = qml.AdamOptimizer(stepsize=5e-4)  # Lower learning rate
+    # Adjusted hyperparameters for speed
+    actor_optimizer = qml.AdamOptimizer(stepsize=5e-4)
     critic_optimizer = qml.AdamOptimizer(stepsize=1e-3)
     
     gamma = 0.99
     tau = 0.005
     batch_size = 64
-    warmup_episodes = 10  # Random exploration first
+    warmup_episodes = 5  # Reduced from 10
     
-    epochs = 300
-    episodes_per_epoch = 5
-    exploration_noise = 0.2  # Higher initial exploration
+    epochs = 25  # Reduced from 300
+    episodes_per_epoch = 3  # Reduced from 5
+    train_steps = 20  # Reduced from 50
+    exploration_noise = 0.2
     
     best_reward = -float('inf')
     
-    print("Training Improved Quantum DDPG on BipedalWalker-v3")
-    print("=" * 60)
+    print(f"\nHyperparameters:")
+    print(f"  Epochs: {epochs} | Episodes/Epoch: {episodes_per_epoch} | Train Steps: {train_steps}")
+    print(f"  Actor LR: {5e-4} | Critic LR: {1e-3} | Batch Size: {batch_size}")
+    print(f"  Warmup Episodes: {warmup_episodes}")
+    print("="*70)
     
     total_episodes = 0
     
@@ -225,7 +300,7 @@ def main():
         
         # Train only after warmup
         if total_episodes >= warmup_episodes and len(replay_buffer) >= batch_size:
-            for _ in range(50):
+            for _ in range(train_steps):
                 states, actions, rewards, next_states, dones = replay_buffer.sample(batch_size)
                 
                 # Update Critic
@@ -281,6 +356,10 @@ def main():
         # Logging
         avg_reward = np.mean(epoch_rewards)
         max_reward = np.max(epoch_rewards)
+        min_reward = np.min(epoch_rewards)
+        std_reward = np.std(epoch_rewards)
+        
+        logger.log_epoch(epoch + 1, avg_reward, max_reward, min_reward, std_reward, exploration_noise)
         
         if avg_reward > best_reward:
             best_reward = avg_reward
@@ -298,12 +377,17 @@ def main():
     
     env.close()
     
+    # Save CSV
+    logger.save_csv()
+    
     # Test
-    print("\n--- Testing ---")
+    print("\n" + "="*70)
+    print("Testing Phase")
+    print("="*70)
     test_env = gym.make('BipedalWalker-v3')
     test_rewards = []
     
-    for _ in range(20):
+    for i in range(20):
         state, _ = test_env.reset()
         total_reward = 0
         done = False
@@ -317,10 +401,75 @@ def main():
             steps += 1
         
         test_rewards.append(total_reward)
+        print(f"Test {i+1:2d}/20 | Reward: {total_reward:7.2f}")
     
-    print(f"Test Average: {np.mean(test_rewards):.2f} ± {np.std(test_rewards):.2f}")
-    print(f"Test Best: {np.max(test_rewards):.2f}")
+    test_avg = np.mean(test_rewards)
+    test_std = np.std(test_rewards)
+    test_max = np.max(test_rewards)
+    test_min = np.min(test_rewards)
+    
+    print("="*70)
+    print(f"Test Results: {test_avg:.2f} ± {test_std:.2f} | Best: {test_max:.2f} | Worst: {test_min:.2f}")
+    print("="*70)
+    
     test_env.close()
+    
+    # Save test results to CSV
+    test_csv = f'{model_name}_test_results_{logger.timestamp}.csv'
+    with open(test_csv, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['episode', 'reward'])
+        for i, reward in enumerate(test_rewards, 1):
+            writer.writerow([i, reward])
+        writer.writerow(['average', test_avg])
+        writer.writerow(['std', test_std])
+        writer.writerow(['max', test_max])
+        writer.writerow(['min', test_min])
+    print(f"✓ Test results saved: {test_csv}")
+    
+    # Create plots
+    test_results = {'rewards': test_rewards}
+    logger.plot_results(test_results)
+    
+    # Save model
+    model_data = {
+        'actor': actor,
+        'critic': critic,
+        'target_actor': target_actor,
+        'target_critic': target_critic,
+        'replay_buffer': replay_buffer,
+        'config': {
+            'state_dim': 24,
+            'n_qubits': 4,
+            'n_actions': 4,
+            'n_layers': 2,
+            'actor_lr': 5e-4,
+            'critic_lr': 1e-3,
+            'gamma': gamma,
+            'tau': tau,
+            'batch_size': batch_size,
+            'epochs': epochs,
+            'episodes_per_epoch': episodes_per_epoch
+        },
+        'test_results': {
+            'avg': test_avg,
+            'std': test_std,
+            'max': test_max,
+            'min': test_min
+        }
+    }
+    model_file = f'{model_name}_model_{logger.timestamp}.pkl'
+    with open(model_file, 'wb') as f:
+        pickle.dump(model_data, f)
+    print(f"✓ Model saved: {model_file}")
+    
+    print("\n" + "="*70)
+    print("✓ Training Complete!")
+    print(f"  - Training CSV: {logger.csv_filename}")
+    print(f"  - Test CSV: {test_csv}")
+    print(f"  - Plots: {model_name}_plots_{logger.timestamp}.png")
+    print(f"  - Model: {model_file}")
+    print("="*70)
 
 
 if __name__ == '__main__':
